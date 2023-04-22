@@ -57,3 +57,5 @@ Nhắm mục tiêu lại hình ảnh được phát minh bởi Vidya Setlur, Sae
 - MIT 18.S191 Fall 2020 - Seam Carving - James Schloss
 
 - Convolution - 3Blue1Brown - Grant Sanderson
+
+- Seam Carving - github - the OnlyWyvern
