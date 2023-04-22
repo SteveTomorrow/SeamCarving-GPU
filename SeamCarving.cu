@@ -1,6 +1,6 @@
 #include <stdio.h>
 #include <stdint.h>
-#include "./src/library.h"
+#include "./library.h"
 
 using namespace std;
 
