@@ -4,6 +4,7 @@
 
 using namespace std;
 
+// Seam Carving cu C++ GPU
 
 int WIDTH;
 __device__ int d_WIDTH;
