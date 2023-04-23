@@ -1,8 +1,11 @@
 # SeamCarving-GPU
 
-Seam Carving (hoặc thay đổi kích thước chất lỏng ) là một thuật toán để thay đổi kích thước hình ảnh nhận biết nội dung , được phát triển bởi Shai Avidan , thuộc Phòng thí nghiệm Nghiên cứu Điện Mitsubishi (MERL) và Ariel Shamir , thuộc Trung tâm Liên ngành và MERL. Nó hoạt động bằng cách thiết lập một số seam (seam ít quan trọng nhất) trong một hình ảnh và tự động loại bỏ seam để giảm kích thước hình ảnh hoặc chèn seam để mở rộng nó. Seam Carving cũng cho phép xác định thủ công các khu vực không thể sửa đổi pixel và có khả năng xóa toàn bộ đối tượng khỏi ảnh.
+khắc đường may
 
-Mục đích của thuật toán là nhắm mục tiêu lại hình ảnh, đây là vấn đề hiển thị hình ảnh mà không bị biến dạng trên các phương tiện có kích thước khác nhau (điện thoại di động, màn hình chiếu) bằng cách sử dụng các tiêu chuẩn tài liệu, như HTML, đã hỗ trợ các thay đổi động trong bố cục trang và văn bản nhưng không hỗ trợ hình ảnh.
+Đây là một triển khai C++ của thuật toán khắc đường may. Mục đích của thuật toán khắc đường nối là chỉnh lại kích thước hình ảnh mà không làm biến dạng các phần "quan trọng" của hình ảnh, giống như trường hợp bạn chỉ cố gắng thay đổi kích thước hình ảnh thông thường.
 
-Nhắm mục tiêu lại hình ảnh được phát minh bởi Vidya Setlur, Saeko Takage, Ramesh Raskar, Michael Gleicher và Bruce Gooch vào năm 2005. Công trình của Setlur et al. giành được giải thưởng tác động 10 năm vào năm 2015 [ ở đâu? ] .
+Thuật toán khắc đường nối tính toán đường nối (đường dẫn gồm 8 pixel được kết nối) từ trên xuống dưới hoặc từ trái sang phải. Một đường nối được tính toán bằng cách duyệt qua bản đồ năng lượng tích lũy của hình ảnh và chọn đường đi có chi phí thấp nhất. Để tạo bản đồ năng lượng tích lũy, chúng ta cần một hình ảnh năng lượng. Để có được hình ảnh năng lượng, chúng tôi sử dụng một gradient theo hướng x và y của hình ảnh, sau đó kết hợp chúng để tạo thành hình ảnh năng lượng: ...
 
+Từ hình ảnh năng lượng này, chúng ta có thể tính toán bản đồ năng lượng tích lũy. Chúng tôi di chuyển theo một hướng (trong ví dụ này là từ trên xuống dưới). Tại mỗi hàng, chúng tôi lặp qua tất cả các pixel. Tại mỗi pixel, chúng tôi kiểm tra ba pixel phía trên phía trên pixel hiện tại, chọn mức tối thiểu trong số đó và thêm chúng vào tổng số đang chạy tại pixel đó. Cuối cùng, chúng tôi tạo thành một hình ảnh có thể được biểu thị dưới dạng: ... (màu xanh biểu thị năng lượng thấp, màu đỏ biểu thị năng lượng cao)
+
+Từ đây, chúng tôi nhìn vào hàng cuối cùng của bản đồ, chọn giá trị tối thiểu và theo dõi đường dẫn tối thiểu cho đến khi đạt đến đỉnh của hình ảnh. Điều này trở thành đường may mà chúng tôi loại bỏ. Rửa sạch và lặp lại.
