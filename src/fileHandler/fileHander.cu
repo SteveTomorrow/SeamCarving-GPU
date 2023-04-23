@@ -1,6 +1,6 @@
 #include <stdio.h>
 #include <stdint.h>
-
+//
 void readPnm(char * fileName, int &width, int &height, uchar3 * &pixels)
 {
     FILE * f = fopen(fileName, "r");

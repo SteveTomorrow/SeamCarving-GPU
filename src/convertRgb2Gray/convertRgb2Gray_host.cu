@@ -1,6 +1,6 @@
 #include <stdio.h>
 #include <stdint.h>
-
+//convert
 void convertRgb2Gray_host(uchar3 * rgbPic, int width, int height, uint8_t * grayPic) {
     for (int r = 0; r < height; ++r) 
         for (int c = 0; c < width; ++c) {
