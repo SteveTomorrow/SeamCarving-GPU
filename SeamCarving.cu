@@ -128,6 +128,57 @@ __global__ void calEnergy(uint8_t * inPixels, int width, int height, int * energ
         energy[row * d_WIDTH + col] = abs(x_kernel) + abs(y_kernel);
 }
 
+__global__ void calEnergy2(uint8_t* inPixels, int width, int height, int* energy) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Define shared memory
+    __shared__ uint8_t s_inPixels[(BLOCK_SIZE + FILTER_WIDTH - 1) * (BLOCK_SIZE + FILTER_WIDTH - 1)];
+
+    // Load data from global memory to shared memory
+    int s_col = threadIdx.x - FILTER_WIDTH / 2;
+    int s_row = threadIdx.y - FILTER_WIDTH / 2;
+    int s_index = s_row * (BLOCK_SIZE + FILTER_WIDTH - 1) + s_col;
+    int g_index = row * width + col;
+
+    // Copy border pixels to shared memory
+    if (row < height && col < width) {
+        s_inPixels[s_index] = inPixels[g_index];
+        if (s_col < 0) {
+            s_inPixels[s_index - s_col] = inPixels[g_index - s_col];
+        }
+        if (s_col + BLOCK_SIZE >= FILTER_WIDTH) {
+            s_inPixels[s_index + BLOCK_SIZE] = inPixels[g_index + BLOCK_SIZE];
+        }
+        if (s_row < 0) {
+            s_inPixels[s_index - s_row * (BLOCK_SIZE + FILTER_WIDTH - 1)] = inPixels[g_index - s_row * width];
+        }
+        if (s_row + BLOCK_SIZE >= FILTER_WIDTH) {
+            s_inPixels[s_index + BLOCK_SIZE * (BLOCK_SIZE + FILTER_WIDTH - 1)] = inPixels[g_index + BLOCK_SIZE * width];
+        }
+    }
+
+    // Synchronize threads to ensure all data has been loaded to shared memory
+    __syncthreads();
+
+    // Compute energy
+    int x_kernel = 0;
+    int y_kernel = 0;
+    if (row < height && col < width) {
+        for (int i = 0; i < FILTER_WIDTH; i++) {
+            for (int j = 0; j < FILTER_WIDTH; j++) {
+                int s_row_idx = s_row + i;
+                int s_col_idx = s_col + j;
+                uint8_t closest = s_inPixels[s_row_idx * (BLOCK_SIZE + FILTER_WIDTH - 1) + s_col_idx];
+                int filterIdx = i * FILTER_WIDTH + j;
+                x_kernel += closest * d_xSobel[filterIdx];
+                y_kernel += closest * d_ySobel[filterIdx];
+            }
+        }
+        energy[g_index] = abs(x_kernel) + abs(y_kernel);
+    }
+}
+
 __global__ void carvingKernel(int * leastSignificantPixel, uchar3 * outPixels, uint8_t *grayPixels, int * energy, int width) {
     int row = blockIdx.x;
     int baseIdx = row * d_WIDTH;
@@ -138,17 +189,55 @@ __global__ void carvingKernel(int * leastSignificantPixel, uchar3 * outPixels, u
     }
 }
 
-void findSeam(int * minimalEnergy, int *leastSignificantPixel, int width, int height) {
+__global__ void carvingKernel2(int * leastSignificantPixel, uchar3 * outPixels, uint8_t *grayPixels, int * energy, int width) {
+    __shared__ uchar3 sharedPixels[BLOCK_SIZE]; // shared memory for output pixels
+    __shared__ uint8_t sharedGrays[BLOCK_SIZE]; // shared memory for gray pixels
+    __shared__ int sharedEnergy[BLOCK_SIZE]; // shared memory for energy
+
+    int row = blockIdx.x;
+    int tid = threadIdx.x;
+    int baseIdx = row * width;
+    int idx = baseIdx + tid;
+
+    // Load data into shared memory
+    if (tid < width) {
+        sharedPixels[tid] = outPixels[idx];
+        sharedGrays[tid] = grayPixels[idx];
+        sharedEnergy[tid] = energy[idx];
+    }
+
+    __syncthreads(); // Ensure all threads have loaded data into shared memory
+
+    // Update output pixels, gray pixels, and energy
+    for (int i = leastSignificantPixel[row]; i < width - 1; ++i) {
+        if (tid < width - 1) {
+            sharedPixels[tid] = (tid < i) ? sharedPixels[tid] : sharedPixels[tid + 1];
+            sharedGrays[tid] = (tid < i) ? sharedGrays[tid] : sharedGrays[tid + 1];
+            sharedEnergy[tid] = (tid < i) ? sharedEnergy[tid] : sharedEnergy[tid + 1];
+        }
+        __syncthreads(); // Ensure all threads have updated data in shared memory
+    }
+
+    // Write data back to global memory
+    if (tid < width) {
+        outPixels[idx] = sharedPixels[tid];
+        grayPixels[idx] = sharedGrays[tid];
+        energy[idx] = sharedEnergy[tid];
+    }
+}
+
+
+__global__ void findSeamKernel(int *minimalEnergy, int *leastSignificantPixel, int width, int height) {
     int minCol = 0, r = height - 1;
 
     for (int c = 1; c < width; ++c)
-        if (minimalEnergy[r * WIDTH + c] < minimalEnergy[r * WIDTH + minCol])
+        if (minimalEnergy[r * width + c] < minimalEnergy[r * width + minCol])
             minCol = c;
-    
+
     for (; r >= 0; --r) {
         leastSignificantPixel[r] = minCol;
         if (r > 0) {
-            int aboveIdx = (r - 1) * WIDTH + minCol;
+            int aboveIdx = (r - 1) * width + minCol;
             int min = minimalEnergy[aboveIdx], minColCpy = minCol;
 
             if (minColCpy > 0 && minimalEnergy[aboveIdx - 1] < min) {
@@ -196,85 +285,31 @@ __global__ void energyToTheEndKernel(int * energy, int * minimalEnergy, int widt
     }
 }
 
-void deviceResizing(uchar3 * inPixels, int width, int height, int desiredWidth, uchar3 * outPixels, dim3 blockSize) {
-    GpuTimer timer;
-    timer.Start();
 
-    // allocate kernel memory
-    uchar3 * d_inPixels;
-    CHECK(cudaMalloc(&d_inPixels, width * height * sizeof(uchar3)));
-    uint8_t * d_grayPixels;
-    CHECK(cudaMalloc(&d_grayPixels, width * height * sizeof(uint8_t)));
-    int * d_energy;
-    CHECK(cudaMalloc(&d_energy, width * height * sizeof(int)));
-    int * d_leastSignificantPixel;
-    CHECK(cudaMalloc(&d_leastSignificantPixel, height * sizeof(int)));
-    int * d_minimalEnergy;
-    CHECK(cudaMalloc(&d_minimalEnergy, width * height * sizeof(int)));
+void findSeam(int * minimalEnergy, int *leastSignificantPixel, int width, int height) {
+    int minCol = 0, r = height - 1;
 
-    // allocate host memory
-    int * energy = (int *)malloc(width * height * sizeof(int));
-    int * leastSignificantPixel = (int *)malloc(height * sizeof(int));
-    int * minimalEnergy = (int *)malloc(width * height * sizeof(int));
-
-    // dynamically sized smem used to compute energy
-    size_t smemSize = ((blockSize.x + 3 - 1) * (blockSize.y + 3 - 1)) * sizeof(uint8_t);
+    for (int c = 1; c < width; ++c)
+        if (minimalEnergy[r * WIDTH + c] < minimalEnergy[r * WIDTH + minCol])
+            minCol = c;
     
-    // block size use to calculate minimal energy to the end
-    int blockSizeDp = 256;
-    int gridSizeDp = (((width - 1) / blockSizeDp + 1) << 1) + 1;
-    int stripHeight = (blockSizeDp >> 1) + 1;
+    for (; r >= 0; --r) {
+        leastSignificantPixel[r] = minCol;
+        if (r > 0) {
+            int aboveIdx = (r - 1) * WIDTH + minCol;
+            int min = minimalEnergy[aboveIdx], minColCpy = minCol;
 
-    // copy input to device
-    CHECK(cudaMemcpy(d_inPixels, inPixels, width * height * sizeof(uchar3), cudaMemcpyHostToDevice));
-
-    // turn input image to grayscale
-    dim3 gridSize((width-1)/blockSize.x + 1, (height-1)/blockSize.y + 1);
-    convertRgb2GrayKernel<<<gridSize, blockSize>>>(d_inPixels, width, height, d_grayPixels);
-    cudaDeviceSynchronize();
-    CHECK(cudaGetLastError());
-
-    while (width > desiredWidth) {
-        // update energy
-        calEnergy<<<gridSize, blockSize, smemSize>>>(d_grayPixels, width, height, d_energy);
-        cudaDeviceSynchronize();
-        CHECK(cudaGetLastError());
-
-        // compute min seam table
-        for (int i = 0; i < height; i += (stripHeight >> 1)) {
-            energyToTheEndKernel<<<gridSizeDp, blockSizeDp>>>(d_energy, d_minimalEnergy, width, height, i);
-            cudaDeviceSynchronize();
-            CHECK(cudaGetLastError());
+            if (minColCpy > 0 && minimalEnergy[aboveIdx - 1] < min) {
+                min = minimalEnergy[aboveIdx - 1];
+                minCol = minColCpy - 1;
+            }
+            if (minColCpy < width - 1 && minimalEnergy[aboveIdx + 1] < min) {
+                minCol = minColCpy + 1;
+            }
         }
-
-        // find least significant pixel index of each row and store in d_leastSignificantPixel (SEQUENTIAL, in kernel or host)
-        CHECK(cudaMemcpy(minimalEnergy, d_minimalEnergy, WIDTH * height * sizeof(int), cudaMemcpyDeviceToHost));
-        findSeam(minimalEnergy, leastSignificantPixel, width, height);
-
-        // carve
-        CHECK(cudaMemcpy(d_leastSignificantPixel, leastSignificantPixel, height * sizeof(int), cudaMemcpyHostToDevice));
-        carvingKernel<<<height, 1>>>(d_leastSignificantPixel, d_inPixels, d_grayPixels, d_energy, width);
-        cudaDeviceSynchronize();
-        CHECK(cudaGetLastError());
-        
-        --width;
     }
-
-    CHECK(cudaMemcpy(outPixels, d_inPixels, WIDTH * height * sizeof(uchar3), cudaMemcpyDeviceToHost));
-
-    CHECK(cudaFree(d_inPixels));
-    CHECK(cudaFree(d_grayPixels));
-    CHECK(cudaFree(d_energy));
-    CHECK(cudaFree(d_leastSignificantPixel));
-    CHECK(cudaFree(d_minimalEnergy));
-
-    free(minimalEnergy);
-    free(leastSignificantPixel);
-    free(energy);
-
-    timer.Stop();
-    timer.printTime((char *)"device");   
 }
+
 
 // HOST
 
@@ -403,6 +438,91 @@ void hostResizing(uchar3 * inPixels, int width, int height, int desiredWidth, uc
     timer.printTime((char *)"host");
 }
 
+//device
+
+void deviceResizing(uchar3 * inPixels, int width, int height, int desiredWidth, uchar3 * outPixels, dim3 blockSize) {
+    GpuTimer timer;
+    timer.Start();
+
+    // allocate kernel memory
+    uchar3 * d_inPixels;
+    CHECK(cudaMalloc(&d_inPixels, width * height * sizeof(uchar3)));
+    uint8_t * d_grayPixels;
+    CHECK(cudaMalloc(&d_grayPixels, width * height * sizeof(uint8_t)));
+    int * d_energy;
+    CHECK(cudaMalloc(&d_energy, width * height * sizeof(int)));
+    int * d_leastSignificantPixel;
+    CHECK(cudaMalloc(&d_leastSignificantPixel, height * sizeof(int)));
+    int * d_minimalEnergy;
+    CHECK(cudaMalloc(&d_minimalEnergy, width * height * sizeof(int)));
+
+    // allocate host memory
+    int * energy = (int *)malloc(width * height * sizeof(int));
+    int * leastSignificantPixel = (int *)malloc(height * sizeof(int));
+    int * minimalEnergy = (int *)malloc(width * height * sizeof(int));
+
+    // dynamically sized smem used to compute energy
+    size_t smemSize = ((blockSize.x + 3 - 1) * (blockSize.y + 3 - 1)) * sizeof(uint8_t);
+    
+    // block size use to calculate minimal energy to the end
+    int blockSizeDp = 256;
+    int gridSizeDp = (((width - 1) / blockSizeDp + 1) << 1) + 1;
+    int stripHeight = (blockSizeDp >> 1) + 1;
+
+    // copy input to device
+    CHECK(cudaMemcpy(d_inPixels, inPixels, width * height * sizeof(uchar3), cudaMemcpyHostToDevice));
+
+    // turn input image to grayscale
+    dim3 gridSize((width-1)/blockSize.x + 1, (height-1)/blockSize.y + 1);
+    convertRgb2GrayKernel<<<gridSize, blockSize>>>(d_inPixels, width, height, d_grayPixels);
+    cudaDeviceSynchronize();
+    CHECK(cudaGetLastError());
+
+    while (width > desiredWidth) {
+        // update energy
+        calEnergy2<<<gridSize, blockSize, smemSize>>>(d_grayPixels, width, height, d_energy);
+        cudaDeviceSynchronize();
+        CHECK(cudaGetLastError());
+
+        // compute min seam table
+        for (int i = 0; i < height; i += (stripHeight >> 1)) {
+            energyToTheEndKernel<<<gridSizeDp, blockSizeDp>>>(d_energy, d_minimalEnergy, width, height, i);
+            cudaDeviceSynchronize();
+            CHECK(cudaGetLastError());
+        }
+
+        // find least significant pixel index of each row and store in d_leastSignificantPixel (SEQUENTIAL, in kernel or host)
+        // CHECK(cudaMemcpy(minimalEnergy, d_minimalEnergy, WIDTH * height * sizeof(int), cudaMemcpyDeviceToHost));
+        // findSeam(minimalEnergy, leastSignificantPixel, width, height);
+        int numBlocks = (width + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+        findSeamKernel<<<numBlocks, THREADS_PER_BLOCK>>>(d_minimalEnergy, d_leastSignificantPixel, width, height);
+        cudaDeviceSynchronize();
+        CHECK(cudaGetLastError());
+
+        // carve
+        // CHECK(cudaMemcpy(d_leastSignificantPixel, leastSignificantPixel, height * sizeof(int), cudaMemcpyHostToDevice));
+        carvingKernel2<<<height, 1>>>(d_leastSignificantPixel, d_inPixels, d_grayPixels, d_energy, width);
+        cudaDeviceSynchronize();
+        CHECK(cudaGetLastError());
+        
+        --width;
+    }
+
+    CHECK(cudaMemcpy(outPixels, d_inPixels, WIDTH * height * sizeof(uchar3), cudaMemcpyDeviceToHost));
+
+    CHECK(cudaFree(d_inPixels));
+    CHECK(cudaFree(d_grayPixels));
+    CHECK(cudaFree(d_energy));
+    CHECK(cudaFree(d_leastSignificantPixel));
+    CHECK(cudaFree(d_minimalEnergy));
+
+    free(minimalEnergy);
+    free(leastSignificantPixel);
+    free(energy);
+
+    timer.Stop();
+    timer.printTime((char *)"device");   
+}
 
 int main(int argc, char ** argv) {   
 
