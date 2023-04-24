@@ -1,8 +1,6 @@
 #include <stdio.h>
 #include <stdint.h>
 #include "./src/library.h"
-#define THREADS_PER_BLOCK 256
-
 using namespace std;
 
 // Seam Carving cu C++ GPU
@@ -10,12 +8,14 @@ using namespace std;
 int WIDTH;
 __device__ int d_WIDTH;
 
-
 int xSobel[3][3] = {{1,0,-1},{2,0,-2},{1,0,-1}};
 int ySobel[3][3] = {{1,2,1},{0,0,0},{-1,-2,-1}};
 __constant__ int d_xSobel[9] = {1, 0, -1, 2, 0, -2, 1, 0, -1};
 __constant__ int d_ySobel[9] = {1, 2, 1, 0, 0, 0, -1, -2, -1};
 const int filterWidth = 3;
+const int blockSize = 32;
+
+
 
 
 /**
@@ -37,7 +37,6 @@ void checkInput(int argc, char ** argv, int &width, int &height, uchar3 * &rgbPi
 
     WIDTH = width;
     CHECK(cudaMemcpyToSymbol(d_WIDTH, &width, sizeof(int)));
-
     // Check user's desired width
     desiredWidth = atoi(argv[3]);
 
@@ -51,6 +50,7 @@ void checkInput(int argc, char ** argv, int &width, int &height, uchar3 * &rgbPi
         blockSize.x = atoi(argv[4]);
         blockSize.y = atoi(argv[5]);
     } 
+
 
     // Check GPU is working or not
     printDeviceInfo();
@@ -129,55 +129,61 @@ __global__ void calEnergy(uint8_t * inPixels, int width, int height, int * energ
     if (col < width && row < height)
         energy[row * d_WIDTH + col] = abs(x_kernel) + abs(y_kernel);
 }
+__global__ void calEnergy2(uint8_t *inPixels, int width, int height, int *energy) {
+    // Define the size of the tile and the overlap region
+    constexpr int TILE_WIDTH = 32;
+    constexpr int TILE_HEIGHT = 8;
+    constexpr int TILE_OVERLAP = filterWidth / 2;
 
-__global__ void calEnergy2(uint8_t* inPixels, int width, int height, int* energy) {
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    // Define the shared memory buffer
+    __shared__ uint8_t s_inPixels[(TILE_HEIGHT + filterWidth - 1) * (TILE_WIDTH + filterWidth - 1)];
 
-    // Define shared memory
-    __shared__ uint8_t s_inPixels[(blockSize + filterWidth - 1) * (blockSize + filterWidth - 1)];
+    // Calculate the row and column indices
+    const int globalRow = blockIdx.y * (TILE_HEIGHT - TILE_OVERLAP * 2) + threadIdx.y - TILE_OVERLAP;
+    const int globalCol = blockIdx.x * (TILE_WIDTH - TILE_OVERLAP * 2) + threadIdx.x - TILE_OVERLAP;
+    const int threadIndex = threadIdx.y * TILE_WIDTH + threadIdx.x;
+    const int tileWidth = TILE_WIDTH + filterWidth - 1;
+    const int tileHeight = TILE_HEIGHT + filterWidth - 1;
 
-    // Load data from global memory to shared memory
-    int s_col = threadIdx.x - filterWidth / 2;
-    int s_row = threadIdx.y - filterWidth / 2;
-    int s_index = s_row * (blockSize + filterWidth - 1) + s_col;
-    int g_index = row * width + col;
+    // Load data from GMEM to SMEM
+    #pragma unroll
+    for (int i = 0; i < tileHeight; i += TILE_HEIGHT) {
+        #pragma unroll
+        for (int j = 0; j < tileWidth; j += TILE_WIDTH) {
+            // Calculate the indices for the tile
+            const int tileRow = globalRow + i;
+            const int tileCol = globalCol + j;
+            const int tileIndex = (i + threadIdx.y) * tileWidth + (j + threadIdx.x);
 
-    // Copy border pixels to shared memory
-    if (row < height && col < width) {
-        s_inPixels[s_index] = inPixels[g_index];
-        if (s_col < 0) {
-            s_inPixels[s_index - s_col] = inPixels[g_index - s_col];
-        }
-        if (s_col + blockSize >= filterWidth) {
-            s_inPixels[s_index + blockSize] = inPixels[g_index + blockSize];
-        }
-        if (s_row < 0) {
-            s_inPixels[s_index - s_row * (blockSize + filterWidth - 1)] = inPixels[g_index - s_row * width];
-        }
-        if (s_row + blockSize >= filterWidth) {
-            s_inPixels[s_index + blockSize * (blockSize + filterWidth - 1)] = inPixels[g_index + blockSize * width];
+            // Load data into the tile
+            if (tileRow >= 0 && tileRow < height && tileCol >= 0 && tileCol < width) {
+                s_inPixels[tileIndex] = inPixels[tileRow * width + tileCol];
+            } else {
+                s_inPixels[tileIndex] = 0;
+            }
         }
     }
 
-    // Synchronize threads to ensure all data has been loaded to shared memory
+    // Synchronize threads to ensure data is fully loaded
     __syncthreads();
 
-    // Compute energy
-    int x_kernel = 0;
-    int y_kernel = 0;
-    if (row < height && col < width) {
-        for (int i = 0; i < filterWidth; i++) {
-            for (int j = 0; j < filterWidth; j++) {
-                int s_row_idx = s_row + i;
-                int s_col_idx = s_col + j;
-                uint8_t closest = s_inPixels[s_row_idx * (blockSize + filterWidth - 1) + s_col_idx];
-                int filterIdx = i * filterWidth + j;
-                x_kernel += closest * d_xSobel[filterIdx];
-                y_kernel += closest * d_ySobel[filterIdx];
-            }
+    // Calculate energy for the current thread
+    int x_kernel = 0, y_kernel = 0;
+    #pragma unroll
+    for (int i = 0; i < filterWidth; ++i) {
+        #pragma unroll
+        for (int j = 0; j < filterWidth; j += 4) {
+            const int closest1 = s_inPixels[(threadIdx.y + i) * tileWidth + threadIdx.x + j];
+            const int filterIdx = i * filterWidth + j;
+            x_kernel += closest1 * d_xSobel[filterIdx];
+            y_kernel += closest1 * d_ySobel[filterIdx];
         }
-        energy[g_index] = abs(x_kernel) + abs(y_kernel);
+    }
+
+    // Each thread writes result from SMEM to GMEM
+    const int globalIndex = globalRow * width + globalCol;
+    if (globalRow >= 0 && globalRow < height && globalCol >= 0 && globalCol < width) {
+        energy[globalIndex] = abs(x_kernel) + abs(y_kernel);
     }
 }
 
@@ -229,17 +235,23 @@ __global__ void carvingKernel2(int * leastSignificantPixel, uchar3 * outPixels, 
 }
 
 
-__global__ void findSeamKernel(int *minimalEnergy, int *leastSignificantPixel, int width, int height) {
-    int minCol = 0, r = height - 1;
 
-    for (int c = 1; c < width; ++c)
-        if (minimalEnergy[r * width + c] < minimalEnergy[r * width + minCol])
-            minCol = c;
 
-    for (; r >= 0; --r) {
-        leastSignificantPixel[r] = minCol;
+__global__ void findSeamKernel(int * minimalEnergy, int *leastSignificantPixel, int width, int height) {
+    int r = blockIdx.x * blockDim.x + threadIdx.x;
+    if (r >= height) return;
+
+    int minCol = 0, c = width - 1;
+    for (int j = 1; j < width; j++) {
+        if (minimalEnergy[r * width + j] < minimalEnergy[r * width + minCol]) {
+            minCol = j;
+        }
+    }
+
+    for (; c >= 0; --c) {
+        leastSignificantPixel[r * width + c] = minCol;
         if (r > 0) {
-            int aboveIdx = (r - 1) * width + minCol;
+            int aboveIdx = (r - 1) * width + c;
             int min = minimalEnergy[aboveIdx], minColCpy = minCol;
 
             if (minColCpy > 0 && minimalEnergy[aboveIdx - 1] < min) {
@@ -250,8 +262,10 @@ __global__ void findSeamKernel(int *minimalEnergy, int *leastSignificantPixel, i
                 minCol = minColCpy + 1;
             }
         }
+        __syncthreads();
     }
 }
+
 
 __global__ void energyToTheEndKernel(int * energy, int * minimalEnergy, int width, int height, int fromRow) {
     size_t halfBlock = blockDim.x / 2;//blockDim.x >> 1
@@ -445,7 +459,6 @@ void hostResizing(uchar3 * inPixels, int width, int height, int desiredWidth, uc
 void deviceResizing(uchar3 * inPixels, int width, int height, int desiredWidth, uchar3 * outPixels, dim3 blockSize) {
     GpuTimer timer;
     timer.Start();
-
     // allocate kernel memory
     uchar3 * d_inPixels;
     CHECK(cudaMalloc(&d_inPixels, width * height * sizeof(uchar3)));
@@ -482,7 +495,7 @@ void deviceResizing(uchar3 * inPixels, int width, int height, int desiredWidth, 
 
     while (width > desiredWidth) {
         // update energy
-        calEnergy2<<<gridSize, blockSize, smemSize>>>(d_grayPixels, width, height, d_energy);
+        calEnergy<<<gridSize, blockSize, smemSize>>>(d_grayPixels, width, height, d_energy);
         cudaDeviceSynchronize();
         CHECK(cudaGetLastError());
 
@@ -494,16 +507,15 @@ void deviceResizing(uchar3 * inPixels, int width, int height, int desiredWidth, 
         }
 
         // find least significant pixel index of each row and store in d_leastSignificantPixel (SEQUENTIAL, in kernel or host)
-        // CHECK(cudaMemcpy(minimalEnergy, d_minimalEnergy, WIDTH * height * sizeof(int), cudaMemcpyDeviceToHost));
-        // findSeam(minimalEnergy, leastSignificantPixel, width, height);
-        int numBlocks = (width + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
-        findSeamKernel<<<numBlocks, THREADS_PER_BLOCK>>>(d_minimalEnergy, d_leastSignificantPixel, width, height);
-        cudaDeviceSynchronize();
-        CHECK(cudaGetLastError());
+        CHECK(cudaMemcpy(minimalEnergy, d_minimalEnergy, WIDTH * height * sizeof(int), cudaMemcpyDeviceToHost));
+        findSeam(minimalEnergy, leastSignificantPixel, width, height);
+        // findSeamKernel<<<gridSize,blockSize>>>(d_minimalEnergy, d_leastSignificantPixel, width, height);
+        // cudaDeviceSynchronize();
+        // CHECK(cudaGetLastError());
 
         // carve
-        // CHECK(cudaMemcpy(d_leastSignificantPixel, leastSignificantPixel, height * sizeof(int), cudaMemcpyHostToDevice));
-        carvingKernel2<<<height, 1>>>(d_leastSignificantPixel, d_inPixels, d_grayPixels, d_energy, width);
+        CHECK(cudaMemcpy(d_leastSignificantPixel, leastSignificantPixel, height * sizeof(int), cudaMemcpyHostToDevice));
+        carvingKernel<<<height, 1>>>(d_leastSignificantPixel, d_inPixels, d_grayPixels, d_energy, width);
         cudaDeviceSynchronize();
         CHECK(cudaGetLastError());
         
