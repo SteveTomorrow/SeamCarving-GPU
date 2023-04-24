@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include "./src/library.h"
+#define THREADS_PER_BLOCK 256
 
 using namespace std;
 
@@ -8,6 +9,7 @@ using namespace std;
 
 int WIDTH;
 __device__ int d_WIDTH;
+
 
 int xSobel[3][3] = {{1,0,-1},{2,0,-2},{1,0,-1}};
 int ySobel[3][3] = {{1,2,1},{0,0,0},{-1,-2,-1}};
