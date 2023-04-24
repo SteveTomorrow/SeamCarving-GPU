@@ -133,12 +133,12 @@ __global__ void calEnergy2(uint8_t* inPixels, int width, int height, int* energy
     int col = blockIdx.x * blockDim.x + threadIdx.x;
 
     // Define shared memory
-    __shared__ uint8_t s_inPixels[(BLOCK_SIZE + FILTER_WIDTH - 1) * (BLOCK_SIZE + FILTER_WIDTH - 1)];
+    __shared__ uint8_t s_inPixels[(blockSize + filterWidth - 1) * (blockSize + filterWidth - 1)];
 
     // Load data from global memory to shared memory
-    int s_col = threadIdx.x - FILTER_WIDTH / 2;
-    int s_row = threadIdx.y - FILTER_WIDTH / 2;
-    int s_index = s_row * (BLOCK_SIZE + FILTER_WIDTH - 1) + s_col;
+    int s_col = threadIdx.x - filterWidth / 2;
+    int s_row = threadIdx.y - filterWidth / 2;
+    int s_index = s_row * (blockSize + filterWidth - 1) + s_col;
     int g_index = row * width + col;
 
     // Copy border pixels to shared memory
@@ -147,14 +147,14 @@ __global__ void calEnergy2(uint8_t* inPixels, int width, int height, int* energy
         if (s_col < 0) {
             s_inPixels[s_index - s_col] = inPixels[g_index - s_col];
         }
-        if (s_col + BLOCK_SIZE >= FILTER_WIDTH) {
-            s_inPixels[s_index + BLOCK_SIZE] = inPixels[g_index + BLOCK_SIZE];
+        if (s_col + blockSize >= filterWidth) {
+            s_inPixels[s_index + blockSize] = inPixels[g_index + blockSize];
         }
         if (s_row < 0) {
-            s_inPixels[s_index - s_row * (BLOCK_SIZE + FILTER_WIDTH - 1)] = inPixels[g_index - s_row * width];
+            s_inPixels[s_index - s_row * (blockSize + filterWidth - 1)] = inPixels[g_index - s_row * width];
         }
-        if (s_row + BLOCK_SIZE >= FILTER_WIDTH) {
-            s_inPixels[s_index + BLOCK_SIZE * (BLOCK_SIZE + FILTER_WIDTH - 1)] = inPixels[g_index + BLOCK_SIZE * width];
+        if (s_row + blockSize >= filterWidth) {
+            s_inPixels[s_index + blockSize * (blockSize + filterWidth - 1)] = inPixels[g_index + blockSize * width];
         }
     }
 
@@ -165,12 +165,12 @@ __global__ void calEnergy2(uint8_t* inPixels, int width, int height, int* energy
     int x_kernel = 0;
     int y_kernel = 0;
     if (row < height && col < width) {
-        for (int i = 0; i < FILTER_WIDTH; i++) {
-            for (int j = 0; j < FILTER_WIDTH; j++) {
+        for (int i = 0; i < filterWidth; i++) {
+            for (int j = 0; j < filterWidth; j++) {
                 int s_row_idx = s_row + i;
                 int s_col_idx = s_col + j;
-                uint8_t closest = s_inPixels[s_row_idx * (BLOCK_SIZE + FILTER_WIDTH - 1) + s_col_idx];
-                int filterIdx = i * FILTER_WIDTH + j;
+                uint8_t closest = s_inPixels[s_row_idx * (blockSize + filterWidth - 1) + s_col_idx];
+                int filterIdx = i * filterWidth + j;
                 x_kernel += closest * d_xSobel[filterIdx];
                 y_kernel += closest * d_ySobel[filterIdx];
             }
@@ -190,9 +190,9 @@ __global__ void carvingKernel(int * leastSignificantPixel, uchar3 * outPixels, u
 }
 
 __global__ void carvingKernel2(int * leastSignificantPixel, uchar3 * outPixels, uint8_t *grayPixels, int * energy, int width) {
-    __shared__ uchar3 sharedPixels[BLOCK_SIZE]; // shared memory for output pixels
-    __shared__ uint8_t sharedGrays[BLOCK_SIZE]; // shared memory for gray pixels
-    __shared__ int sharedEnergy[BLOCK_SIZE]; // shared memory for energy
+    __shared__ uchar3 sharedPixels[blockSize]; // shared memory for output pixels
+    __shared__ uint8_t sharedGrays[blockSize]; // shared memory for gray pixels
+    __shared__ int sharedEnergy[blockSize]; // shared memory for energy
 
     int row = blockIdx.x;
     int tid = threadIdx.x;
