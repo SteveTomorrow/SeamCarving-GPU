@@ -235,7 +235,36 @@ __global__ void carvingKernel2(int * leastSignificantPixel, uchar3 * outPixels, 
 }
 
 
+_global_ void carvingKernel3(int * leastSignificantPixel, uchar3 * outPixels, uint8_t *grayPixels, int * energy, int width) {
+    _shared_ uchar3 sharedOutPixels[16];
+    _shared_ uint8_t sharedGrayPixels[16];
+    _shared_ int sharedEnergy[16];
 
+    int row = blockIdx.x;
+    int baseIdx = row * d_WIDTH;
+    int leastSignificant = leastSignificantPixel[row];
+
+
+    for (int i = leastSignificant + threadIdx.x; i < width - 1; i += blockDim.x) {
+        int idx = baseIdx + i;
+
+        // Copy a row of data into shared memory
+        sharedOutPixels[threadIdx.x] = outPixels[idx + 1];
+        sharedGrayPixels[threadIdx.x] = grayPixels[idx + 1];
+        sharedEnergy[threadIdx.x] = energy[idx + 1];
+
+        __syncthreads();
+
+        // Compute values for the current row using the shared data
+        if (i < width - 1) {
+            outPixels[idx] = sharedOutPixels[threadIdx.x];
+            grayPixels[idx] = sharedGrayPixels[threadIdx.x];
+            energy[idx] = sharedEnergy[threadIdx.x];
+        }
+
+        __syncthreads();
+    }
+}
 
 __global__ void findSeamKernel(int * minimalEnergy, int *leastSignificantPixel, int width, int height) {
     int r = blockIdx.x * blockDim.x + threadIdx.x;
@@ -515,7 +544,7 @@ void deviceResizing(uchar3 * inPixels, int width, int height, int desiredWidth, 
 
         // carve
         CHECK(cudaMemcpy(d_leastSignificantPixel, leastSignificantPixel, height * sizeof(int), cudaMemcpyHostToDevice));
-        carvingKernel<<<height, 1>>>(d_leastSignificantPixel, d_inPixels, d_grayPixels, d_energy, width);
+        carvingKernel3<<<height, 1>>>(d_leastSignificantPixel, d_inPixels, d_grayPixels, d_energy, width);
         cudaDeviceSynchronize();
         CHECK(cudaGetLastError());
         
