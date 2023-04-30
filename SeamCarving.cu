@@ -245,6 +245,7 @@ __global__ void carvingKernel1(int * leastSignificantPixel, uchar3 * outPixels, 
         energy[baseIdx + i] = energy[baseIdx + i + 1];
     }
 }
+
 __global__ void carvingKernel2(int * leastSignificantPixel, uchar3 * outPixels, uint8_t *grayPixels, int * energy, int width) {
     int row = blockIdx.x;
     int leastSignificant = leastSignificantPixel[row];
