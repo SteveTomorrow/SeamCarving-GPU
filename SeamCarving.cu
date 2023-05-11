@@ -5,7 +5,8 @@ using namespace std;
 #define BLOCK_SIZE 32
 #define THREADS_PER_BLOCK 256
 // Seam Carving cu C++ GPU
-
+#define MAX_HEIGHT 500
+#define MAX_WIDTH 500
 int WIDTH;
 __device__ int d_WIDTH;
 
@@ -120,6 +121,7 @@ __global__ void calEnergyKernel(uint8_t * inPixels, int width, int height, int *
     if (col < width && row < height)
         energy[row * d_WIDTH + col] = abs(x_kernel) + abs(y_kernel);
 }
+
 __global__ void energyToTheEndKernel(int * energy, int * minimalEnergy, int width, int height, int fromRow) {
     size_t halfBlock = blockDim.x / 2;//blockDim.x >> 1
 
@@ -154,43 +156,6 @@ __global__ void energyToTheEndKernel(int * energy, int * minimalEnergy, int widt
     }
 }
 
-__global__ void energyToTheEndKernel1(int *energy, int *minimalEnergy, int width, int height, int fromRow)
-{
-    extern __shared__ int sharedMinimalEnergy[];
-
-    size_t halfBlock = blockDim.x / 2;
-    int col = blockIdx.x * halfBlock - halfBlock + threadIdx.x;
-
-    if (fromRow == 0 && col >= 0 && col < width)
-    {
-        sharedMinimalEnergy[threadIdx.x] = energy[col];
-    }
-    __syncthreads();
-
-    for (int stride = fromRow != 0 ? 0 : 1; stride < halfBlock && fromRow + stride < height; ++stride)
-    {
-        int curRow = fromRow + stride;
-        int curCol = col + stride;
-
-        if (curCol >= 0 && curCol < width)
-        {
-            int idx = curRow * width + curCol;
-
-            int min = sharedMinimalEnergy[threadIdx.x + stride];
-            if (curCol > 0 && sharedMinimalEnergy[threadIdx.x + stride - 1] < min)
-                min = sharedMinimalEnergy[threadIdx.x + stride - 1];
-
-            if (curCol < width - 1 && sharedMinimalEnergy[threadIdx.x + stride + 1] < min)
-                min = sharedMinimalEnergy[threadIdx.x + stride + 1];
-
-            minimalEnergy[idx] = min + energy[idx];
-            sharedMinimalEnergy[threadIdx.x + stride] = minimalEnergy[idx];
-        }
-        __syncthreads();
-    }
-}
-
-
 __global__ void findSeamKernel(int * minimalEnergy, int * leastSignificantPixel, int width, int height) {
     int col = blockIdx.x * blockDim.x + threadIdx.x; // tính toán chỉ số cột tương ứng với thread
     int row = blockIdx.y * blockDim.y + threadIdx.y; // tính toán chỉ số hàng tương ứng với thread
@@ -210,7 +175,7 @@ __global__ void findSeamKernel(int * minimalEnergy, int * leastSignificantPixel,
     __syncthreads(); // đồng bộ hoá tất cả các thread
 
     for (; r >= 0; --r) {
-        leastSignificantPixel[r] = minCol; // lưu chỉ số cột tối thiểu tại mỗi pixel
+        leastSignificantPixel[r] = minCol; 
 
         __syncthreads(); // đồng bộ hoá tất cả các thread
 
@@ -567,24 +532,12 @@ void deviceResizing(uchar3 * inPixels, int width, int height, int desiredWidth, 
                 carvingKernel2<<<height, 1>>>(d_leastSignificantPixel, d_inPixels, d_grayPixels, d_energy, width);
                 cudaDeviceSynchronize();
                 CHECK(cudaGetLastError());
-                break;
-            // case 3:
-            //     findSeamKernel2<<<numBlocks, numThreadsPerBlock>>>(d_minimalEnergy, d_leastSignificantPixel, width, height);
-            //     cudaDeviceSynchronize();
-            //     CHECK(cudaGetLastError());
-            //     carvingKernel2<<<height, 1>>>(d_leastSignificantPixel, d_inPixels, d_grayPixels, d_energy, width);
-            //     cudaDeviceSynchronize();
-            //     CHECK(cudaGetLastError());
-            //     break;
-                            
+                break;               
         }
-
-        
         --width;
     }
 
     CHECK(cudaMemcpy(outPixels, d_inPixels, WIDTH * height * sizeof(uchar3), cudaMemcpyDeviceToHost));
-
     CHECK(cudaFree(d_inPixels));
     CHECK(cudaFree(d_grayPixels));
     CHECK(cudaFree(d_energy));
